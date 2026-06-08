@@ -1,5 +1,4 @@
-      - name: Remove old module versions
-        run: |
+      - name: Remove old module versions. run: |
           cd modules
           
           # This will find all .mp files
