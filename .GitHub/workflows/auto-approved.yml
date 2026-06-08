@@ -1,1 +1,26 @@
-p
+# The name of your automation robot
+name: MP++ Module Auto-Merger
+
+# WHEN should this robot wake up?
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'modules/**' # Only run if someone changes or adds files inside the modules folder
+
+# WHAT should the robot do?
+jobs:
+  merge-it:
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Tell the robot to download your repository code to its virtual server
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Use an official community tool to automatically merge the Pull Request
+      - name: Automatically Merge Pull Request
+        uses: "pascalgn/automerge-action@v0.16.4"
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" # Built-in security key GitHub makes for you
+          MERGE_METHOD: "merge"
