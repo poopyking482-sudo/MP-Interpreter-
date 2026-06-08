@@ -9,7 +9,8 @@
 #include <stdexcept>
 #include <memory>
 #include <cstring>
-#include <fstream> // Crucial for reading downloaded files!
+#include <fstream>
+#include <cctype>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -20,6 +21,8 @@
 // ============================================================================
 // 1. HARDWARE JIT ENGINE BACKEND
 // ============================================================================
+enum class JitOp { Add, Sub, Mul };
+
 class JITEngine {
 private:
     std::vector<uint8_t> machine_code;
@@ -58,7 +61,6 @@ public:
         }
     }
 
-    // Emit 'mov eax, imm32' (0xB8)
     void emit_mov_eax(int value) {
         machine_code.push_back(0xB8);
         machine_code.push_back((value >> 0) & 0xFF);
@@ -67,7 +69,6 @@ public:
         machine_code.push_back((value >> 24) & 0xFF);
     }
 
-    // Emit 'mov ecx, imm32' (0xB9)
     void emit_mov_ecx(int value) {
         machine_code.push_back(0xB9);
         machine_code.push_back((value >> 0) & 0xFF);
@@ -76,53 +77,117 @@ public:
         machine_code.push_back((value >> 24) & 0xFF);
     }
 
-    // Emit 'add eax, ecx' (0x01 0xC8)
-    void emit_add_eax_ecx() {
-        machine_code.push_back(0x01);
-        machine_code.push_back(0xC8);
-    }
-
-    // Emit 'sub eax, ecx' (0x29 0xC8)
-    void emit_sub_eax_ecx() {
-        machine_code.push_back(0x29);
-        machine_code.push_back(0xC8);
-    }
-
-    // Emit 'imul eax, ecx' (0x0F 0xAF 0xC1)
-    void emit_imul_eax_ecx() {
-        machine_code.push_back(0x0F);
-        machine_code.push_back(0xAF);
-        machine_code.push_back(0xC1);
-    }
-
-    // Emit 'ret' (0xC3)
-    void emit_ret() {
-        machine_code.push_back(0xC3);
-    }
+    void emit_add_eax_ecx()  { machine_code.push_back(0x01); machine_code.push_back(0xC8); }
+    void emit_sub_eax_ecx()  { machine_code.push_back(0x29); machine_code.push_back(0xC8); }
+    void emit_imul_eax_ecx() { machine_code.push_back(0x0F); machine_code.push_back(0xAF); machine_code.push_back(0xC1); }
+    void emit_ret()          { machine_code.push_back(0xC3); }
 
     int execute() {
         if (machine_code.empty()) return 0;
-
         allocated_size = machine_code.size();
         exec_mem = allocate_executable_memory(allocated_size);
-        if (!exec_mem) {
-            std::cerr << "✗ OS Error: Execution allocation denied.\n";
-            return -1;
-        }
+        if (!exec_mem) return -1;
 
         std::memcpy(exec_mem, machine_code.data(), allocated_size);
-
         typedef int (*JitFunc)();
-        JitFunc run = reinterpret_cast<JitFunc>(exec_mem);
-        return run();
+        return reinterpret_cast<JitFunc>(exec_mem)();
+    }
+
+    int compile_and_run(int lhs, int rhs, JitOp op) {
+        clear();
+        emit_mov_eax(lhs);
+        emit_mov_ecx(rhs);
+        switch (op) {
+            case JitOp::Add: emit_add_eax_ecx(); break;
+            case JitOp::Sub: emit_sub_eax_ecx(); break;
+            case JitOp::Mul: emit_imul_eax_ecx(); break;
+        }
+        emit_ret();
+        return execute();
     }
 };
 
 JITEngine jit;
 
 // ============================================================================
-// 2. PARSER AND INTERPRETER FRONTEND
+// 2. LEXICAL TOKENIZER
 // ============================================================================
+enum class TokenType {
+    Keyword_Auto, Keyword_Const, Keyword_If, Keyword_Else, Keyword_While,
+    Identifier, Number, String,
+    Plus, Minus, Star, Assign, EqualEqual, Arrow,
+    OpenBrace, CloseBrace, OpenParen, CloseParen, Semicolon,
+    Unknown
+};
+
+struct Token {
+    TokenType type;
+    std::string value;
+};
+
+std::vector<Token> tokenize(std::string_view source) {
+    std::vector<Token> tokens;
+    size_t i = 0;
+    while (i < source.length()) {
+        if (std::isspace(source[i])) { i++; continue; }
+        if (source.substr(i, 2) == "//") {
+            while (i < source.length() && source[i] != '\n') i++;
+            continue;
+        }
+
+        if (source.substr(i, 2) == "==") { tokens.push_back({TokenType::EqualEqual, "=="}); i += 2; continue; }
+        if (source.substr(i, 2) == "->") { tokens.push_back({TokenType::Arrow, "->"}); i += 2; continue; }
+
+        if (source[i] == '=') { tokens.push_back({TokenType::Assign, "="}); i++; continue; }
+        if (source[i] == '+') { tokens.push_back({TokenType::Plus, "+"}); i++; continue; }
+        if (source[i] == '-') { tokens.push_back({TokenType::Minus, "-"}); i++; continue; }
+        if (source[i] == '*') { tokens.push_back({TokenType::Star, "*"}); i++; continue; }
+        if (source[i] == '{') { tokens.push_back({TokenType::OpenBrace, "{"}); i++; continue; }
+        if (source[i] == '}') { tokens.push_back({TokenType::CloseBrace, "}"}); i++; continue; }
+        if (source[i] == '(') { tokens.push_back({TokenType::OpenParen, "("}); i++; continue; }
+        if (source[i] == ')') { tokens.push_back({TokenType::CloseParen, ")"}); i++; continue; }
+        if (source[i] == ';') { tokens.push_back({TokenType::Semicolon, ";"}); i++; continue; }
+
+        if (source[i] == '"' || source[i] == '\'') {
+            char quote = source[i++];
+            std::string str;
+            while (i < source.length() && source[i] != quote) str += source[i++];
+            if (i < source.length()) i++;
+            tokens.push_back({TokenType::String, str});
+            continue;
+        }
+
+        if (std::isdigit(source[i])) {
+            std::string num;
+            while (i < source.length() && std::isdigit(source[i])) num += source[i++];
+            tokens.push_back({TokenType::Number, num});
+            continue;
+        }
+
+        if (std::isalpha(source[i]) || source[i] == '_') {
+            std::string ident;
+            while (i < source.length() && (std::isalnum(source[i]) || source[i] == '_')) ident += source[i++];
+            if (ident == "auto") tokens.push_back({TokenType::Keyword_Auto, ident});
+            else if (ident == "const") tokens.push_back({TokenType::Keyword_Const, ident});
+            else if (ident == "if") tokens.push_back({TokenType::Keyword_If, ident});
+            else if (ident == "else") tokens.push_back({TokenType::Keyword_Else, ident});
+            else if (ident == "while") tokens.push_back({TokenType::Keyword_While, ident});
+            else tokens.push_back({TokenType::Identifier, ident});
+            continue;
+        }
+        i++;
+    }
+    return tokens;
+}
+
+// ============================================================================
+// 3. ENVIRONMENT AND VARIABLE SYSTEM
+// ============================================================================
+struct Variable {
+    std::string value;
+    bool is_const = false;
+};
+
 struct string_hash {
     using is_transparent = void;
     size_t operator()(std::string_view sv) const { return std::hash<std::string_view>{}(sv); }
@@ -130,18 +195,33 @@ struct string_hash {
 };
 
 struct Environment {
-    std::unordered_map<std::string, std::string, string_hash, std::equal_to<>> variables;
+    std::unordered_map<std::string, Variable, string_hash, std::equal_to<>> variables;
     std::shared_ptr<Environment> parent = nullptr;
 
-    void set(std::string_view name, std::string_view val) {
-        variables[std::string(name)] = std::string(val);
+    void declare(std::string_view name, std::string_view val, bool is_const) {
+        variables[std::string(name)] = {std::string(val), is_const};
+    }
+
+    bool update(std::string_view name, std::string_view val) {
+        auto it = variables.find(name);
+        if (it != variables.end()) {
+            if (it->second.is_const) {
+                std::cerr << "✗ Error: Cannot assign modification value to const-qualified variable '" << name << "'.\n";
+                return false;
+            }
+            it->second.value = std::string(val);
+            return true;
+        }
+        if (parent) return parent->update(name, val);
+        std::cerr << "✗ Error: Variable '" << name << "' must be explicitly defined using 'auto'.\n";
+        return false;
     }
 
     std::string get(std::string_view name, bool& found) {
         auto it = variables.find(name);
         if (it != variables.end()) {
             found = true;
-            return it->second;
+            return it->second.value;
         }
         if (parent) return parent->get(name, found);
         found = false;
@@ -151,387 +231,226 @@ struct Environment {
 
 struct InterpreterContext {
     std::shared_ptr<Environment> global_env = std::make_shared<Environment>();
-    std::unordered_map<std::string, std::vector<std::string>, string_hash, std::equal_to<>> functions;
+    std::unordered_map<std::string, std::vector<Token>, string_hash, std::equal_to<>> functions;
 };
 
 InterpreterContext ctx;
 
-std::string_view trim(std::string_view str) {
-    size_t first = str.find_first_not_of(" \t\r\n");
-    if (first == std::string_view::npos) return "";
-    size_t last = str.find_last_not_of(" \t\r\n");
-    return str.substr(first, (last - first + 1));
-}
-
-std::string resolve_vars(std::string_view expression, std::shared_ptr<Environment> env) {
-    std::string_view token = trim(expression);
-    if (token.empty()) return "";
-
-    if (token.length() >= 2 && 
-        ((token.front() == '"' && token.back() == '"') || 
-         (token.front() == '\'' && token.back() == '\''))) {
-        return std::string(token.substr(1, token.length() - 2));
-    }
-    
-    bool found = false;
-    std::string val = env->get(token, found);
-    if (found) return val;
-
-    return std::string(token);
-}
-
-int safe_stoi(const std::string& str, int default_val = 0) {
-    try {
-        return std::stoi(str);
-    } catch (...) {
-        return default_val;
-    }
-}
-
-bool handle_jit_math(std::string_view left_tok, std::string_view right_tok, char op, std::shared_ptr<Environment> env, int& out_result) {
-    std::string lhs = resolve_vars(left_tok, env);
-    std::string rhs = resolve_vars(right_tok, env);
-
-    int val1 = safe_stoi(lhs);
-    int val2 = safe_stoi(rhs);
-
-    jit.clear();
-    jit.emit_mov_eax(val1);
-    jit.emit_mov_ecx(val2);
-
-    if (op == '+') jit.emit_add_eax_ecx();
-    else if (op == '-') jit.emit_sub_eax_ecx();
-    else if (op == '*') jit.emit_imul_eax_ecx();
-    else return false;
-
-    jit.emit_ret();
-    out_result = jit.execute();
-    return true;
-}
-
-bool evaluate_single_condition(std::string_view condition, std::shared_ptr<Environment> env) {
-    std::string_view cond = trim(condition);
-    
-    size_t op_pos = cond.find("==");
-    if (op_pos != std::string_view::npos) {
-        std::string left = resolve_vars(cond.substr(0, op_pos), env);
-        std::string right = resolve_vars(cond.substr(op_pos + 2), env);
-        return left == right;
-    }
-    
-    op_pos = cond.find('<');
-    if (op_pos != std::string_view::npos) {
-        std::string left = resolve_vars(cond.substr(0, op_pos), env);
-        std::string right = resolve_vars(cond.substr(op_pos + 1), env);
-        return safe_stoi(left) < safe_stoi(right);
-    }
-
-    op_pos = cond.find('>');
-    if (op_pos != std::string_view::npos) {
-        std::string left = resolve_vars(cond.substr(0, op_pos), env);
-        std::string right = resolve_vars(cond.substr(op_pos + 1), env);
-        return safe_stoi(left) > safe_stoi(right);
-    }
-
-    std::string val = resolve_vars(cond, env);
-    return (val == "true" || val == "1");
-}
-
-bool evaluate_condition(std::string_view condition, std::shared_ptr<Environment> env) {
-    std::string_view cond = trim(condition);
-
-    size_t or_pos = cond.find("||");
-    if (or_pos != std::string_view::npos) {
-        return evaluate_condition(cond.substr(0, or_pos), env) || 
-               evaluate_condition(cond.substr(or_pos + 2), env);
-    }
-
-    size_t and_pos = cond.find("&&");
-    if (and_pos != std::string_view::npos) {
-        return evaluate_condition(cond.substr(0, and_pos), env) && 
-               evaluate_condition(cond.substr(and_pos + 2), env);
-    }
-
-    return evaluate_single_condition(cond, env);
-}
-
-void execute_block(const std::vector<std::string>& lines, size_t& index, size_t end, std::shared_ptr<Environment> env);
-
-void execute_line(std::string_view line, std::shared_ptr<Environment> env) {
-    std::string_view stripped = trim(line);
-    if (stripped.empty() || stripped.rfind("//", 0) == 0) return;
-
-    if (stripped.rfind("say ", 0) == 0 || stripped.rfind("print ", 0) == 0) {
-        size_t space_pos = stripped.find(' ');
-        std::cout << resolve_vars(stripped.substr(space_pos + 1), env) << "\n";
-        return;
-    }
-
-    if (stripped == "fetch") {
-        std::cout << "■ MiniPhone Engine OS (MP++) ■\n";
+// ============================================================================
+// 4. PARSER AND INTERPRETER ENGINE
+// ============================================================================
+std::string resolve_token(const Token& tok, std::shared_ptr<Environment> env) {
+    if (tok.type == TokenType::Identifier) {
         bool found = false;
-        std::string os = ctx.global_env->get("os_name", found);
-        std::cout << "OS: " << (found ? os : "Unknown OS") << "\nTarget: High-Performance JIT Architecture\n";
-        return;
+        std::string val = env->get(tok.value, found);
+        return found ? val : tok.value;
     }
-
-    // GLITCH-PROOFED AUTOMATIC PACKAGE MANAGER COMMAND
-    if (stripped.rfind("mpkg install ", 0) == 0) {
-        std::string pkg_name{trim(stripped.substr(13))};
-        if(pkg_name.find_first_of(";&|`$") != std::string::npos) {
-            std::cout << "✗ Security Error: Invalid package character set detected.\n";
-            return;
-        }
-
-        std::string local_path = "ext/" + pkg_name + ".mp";
-        
-        // Glitch Prevention: Skip loading duplicates to prevent execution loops
-        std::ifstream check_file(local_path);
-        if (check_file.is_open()) {
-            std::cout << "💡 Notice: Module '" << pkg_name << "' is already running inside memory layout context.\n";
-            check_file.close();
-            return;
-        }
-
-        std::cout << "📡 Downloading community module '" << pkg_name << "' from poopyking482-sudo...\n";
-#ifdef _WIN32
-        std::system("if not exist ext mkdir ext");
-#else
-        std::system("mkdir -p ext");
-#endif
-        std::stringstream cmd;
-        cmd << "curl -s -f https://raw.githubusercontent.com/poopyking482-sudo/MP-Interpreter/main/modules/"
-            << pkg_name << ".mpp -o " << local_path;
-            
-        if (std::system(cmd.str().c_str()) == 0) {
-            // Read and automatically execute the downloaded code file into memory
-            std::ifstream file(local_path);
-            if (file.is_open()) {
-                std::string file_line;
-                std::vector<std::string> file_lines;
-                while (std::getline(file, file_line)) {
-                    file_lines.push_back(file_line);
-                }
-                file.close();
-                
-                size_t module_idx = 0;
-                execute_block(file_lines, module_idx, file_lines.size(), env);
-                std::cout << "✓ Module '" << pkg_name << "' safely parsed into language environment registry.\n";
-            }
-        } else {
-            std::cout << "✗ Network Error: Unable to resolve package path on poopyking482-sudo/MP-Interpreter repository.\n";
-        }
-        return;
-    }
-
-    if (auto it = ctx.functions.find(stripped); it != ctx.functions.end()) {
-        size_t local_idx = 0;
-        auto local_env = std::make_shared<Environment>();
-        local_env->parent = env; 
-        execute_block(it->second, local_idx, it->second.size(), local_env);
-        return;
-    }
-
-    size_t assign_pos = stripped.find('=');
-    if (assign_pos != std::string_view::npos && stripped.find("==") == std::string_view::npos) {
-        std::string_view var_name = trim(stripped.substr(0, assign_pos));
-        std::string_view raw_val = trim(stripped.substr(assign_pos + 1));
-        
-        if (var_name == raw_val) {
-            bool found = false;
-            env->get(raw_val, found);
-            if (!found) {
-                std::cout << "Warning: Syntax Error -> Assigning undefined variable '" << raw_val << "' to itself.\n";
-                return;
-            }
-        }
-
-        char math_op = 0;
-        size_t op_pos = std::string_view::npos;
-        if ((op_pos = raw_val.find('+')) != std::string_view::npos) math_op = '+';
-        else if ((op_pos = raw_val.find('-')) != std::string_view::npos) math_op = '-';
-        else if ((op_pos = raw_val.find('*')) != std::string_view::npos) math_op = '*';
-
-        if (math_op != 0) {
-            std::string_view left_side = raw_val.substr(0, op_pos);
-            std::string_view right_side = raw_val.substr(op_pos + 1);
-            int jit_res = 0;
-            if (handle_jit_math(left_side, right_side, math_op, env, jit_res)) {
-                env->set(var_name, std::to_string(jit_res));
-                return;
-            }
-        }
-        
-        env->set(var_name, resolve_vars(raw_val, env));
-        return;
-    }
-
-    char math_op = 0;
-    size_t op_pos = std::string_view::npos;
-    if ((op_pos = stripped.find('+')) != std::string_view::npos) math_op = '+';
-    else if ((op_pos = stripped.find('-')) != std::string_view::npos) math_op = '-';
-    else if ((op_pos = stripped.find('*')) != std::string_view::npos) math_op = '*';
-
-    if (math_op != 0) {
-        std::string_view left_side = stripped.substr(0, op_pos);
-        std::string_view right_side = stripped.substr(op_pos + 1);
-        int jit_res = 0;
-        if (handle_jit_math(left_side, right_side, math_op, env, jit_res)) {
-            std::cout << "» [Silicon JIT Output]: " << jit_res << "\n";
-            return;
-        }
-    }
-
-    std::cout << "Warning: Syntax Error -> '" << stripped << "'\n";
+    return tok.value;
 }
 
-size_t skip_block(const std::vector<std::string>& lines, size_t start_index, size_t end) {
+int safe_stoi(const std::string& str) {
+    try { return std::stoi(str); } catch (...) { return 0; }
+}
+
+size_t skip_cpp_block(const std::vector<Token>& tokens, size_t start) {
     size_t depth = 1;
-    size_t i = start_index;
-    while (i < end && depth > 0) {
-        std::string_view s = trim(lines[i]);
-        if (s.rfind("if ", 0) == 0 || s.rfind("while ", 0) == 0) {
-            if (s.find('{') != std::string_view::npos) depth++;
-        } else if (s == "}" || s == "end" || s.find('}') != std::string_view::npos) {
-            depth--;
-        }
+    size_t i = start;
+    while (i < tokens.size() && depth > 0) {
+        if (tokens[i].type == TokenType::OpenBrace) depth++;
+        else if (tokens[i].type == TokenType::CloseBrace) depth--;
         if (depth == 0) return i;
         i++;
     }
-    return end;
+    return tokens.size();
 }
 
-void execute_block(const std::vector<std::string>& lines, size_t& index, size_t end, std::shared_ptr<Environment> env) {
-    while (index < end) {
-        std::string_view stripped = trim(lines[index]);
+bool evaluate_condition(const std::vector<Token>& tokens, size_t start, size_t end, std::shared_ptr<Environment> env) {
+    if (start >= end) return false;
+    // Simple lookahead evaluation engine for conditions inside paren matrices
+    for (size_t i = start; i < end; ++i) {
+        if (tokens[i].type == TokenType::EqualEqual) {
+            std::string lhs = resolve_token(tokens[start], env);
+            std::string rhs = resolve_token(tokens[i + 1], env);
+            return lhs == rhs;
+        }
+    }
+    std::string val = resolve_token(tokens[start], env);
+    return (val == "true" || val == "1");
+}
 
-        if (stripped.empty() || stripped.rfind("//", 0) == 0) {
-            index++;
+void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, std::shared_ptr<Environment> env) {
+    while (idx < end) {
+        if (tokens[idx].type == TokenType::CloseBrace) {
+            idx++;
+            return;
+        }
+
+        // 1. Function Call Expressions or Native Commands
+        if (tokens[idx].type == TokenType::Identifier) {
+            std::string name = tokens[idx].value;
+
+            if ((name == "print" || name == "println") && tokens[idx + 1].type == TokenType::OpenParen) {
+                idx += 2; // skip print and '('
+                std::cout << resolve_token(tokens[idx], env) << (name == "println" ? "\n" : "");
+                idx += 3; // skip value, ')', and ';'
+                continue;
+            }
+
+            if (name == "fetch" && tokens[idx + 1].type == TokenType::Semicolon) {
+                std::cout << "■ MiniPhone Engine OS (MP++) ■\nTarget: High-Performance Modern C++ JIT Architecture\n";
+                idx += 2;
+                continue;
+            }
+
+            // User Defined Functions
+            if (auto it = ctx.functions.find(name); it != ctx.functions.end() && tokens[idx + 1].type == TokenType::OpenParen) {
+                idx += 4; // skip name, '(', ')', and '{' -> clean execution jumping
+                auto local_env = std::make_shared<Environment>();
+                local_env->parent = env;
+                size_t func_idx = 0;
+                execute_tokens(it->second, func_idx, it->second.size(), local_env);
+                continue;
+            }
+
+            // Variable Assignment (Mutations)
+            if (tokens[idx + 1].type == TokenType::Assign) {
+                std::string var_name = tokens[idx].value;
+                idx += 2; // skip identifier and '='
+                
+                std::string target_val;
+                if (idx + 2 < end && (tokens[idx + 1].type == TokenType::Plus || tokens[idx + 1].type == TokenType::Minus || tokens[idx + 1].type == TokenType::Star)) {
+                    int val1 = safe_stoi(resolve_token(tokens[idx], env));
+                    int val2 = safe_stoi(resolve_token(tokens[idx + 2], env));
+                    JitOp op = (tokens[idx + 1].type == TokenType::Plus) ? JitOp::Add : ((tokens[idx + 1].type == TokenType::Minus) ? JitOp::Sub : JitOp::Mul);
+                    target_val = std::to_string(jit.compile_and_run(val1, val2, op));
+                    idx += 3;
+                } else {
+                    target_val = resolve_token(tokens[idx], env);
+                    idx++;
+                }
+                env->update(var_name, target_val);
+                if (tokens[idx].type == TokenType::Semicolon) idx++;
+                continue;
+            }
+        }
+
+        // 2. Variable Declarations: auto/const auto declarations
+        bool is_const = false;
+        if (tokens[idx].type == TokenType::Keyword_Const) { is_const = true; idx++; }
+        if (tokens[idx].type == TokenType::Keyword_Auto) {
+            idx++; // step over auto
+            
+            // Function Registry: auto main() -> void { ... }
+            if (tokens[idx + 1].type == TokenType::OpenParen) {
+                std::string func_name = tokens[idx].value;
+                idx += 5; // skip name, '(', ')', '->', type to target open brace '{'
+                size_t body_start = idx + 1;
+                size_t body_end = skip_cpp_block(tokens, body_start);
+                
+                std::vector<Token> body_tokens(tokens.begin() + body_start, tokens.begin() + body_end);
+                ctx.functions[func_name] = body_tokens;
+                
+                idx = body_end + 1;
+                continue;
+            }
+
+            // Normal Variable Definition: auto x = value;
+            std::string var_name = tokens[idx].value;
+            idx += 2; // step name and '='
+            
+            std::string var_val;
+            if (idx + 2 < end && (tokens[idx + 1].type == TokenType::Plus || tokens[idx + 1].type == TokenType::Minus || tokens[idx + 1].type == TokenType::Star)) {
+                int val1 = safe_stoi(resolve_token(tokens[idx], env));
+                int val2 = safe_stoi(resolve_token(tokens[idx + 2], env));
+                JitOp op = (tokens[idx + 1].type == TokenType::Plus) ? JitOp::Add : ((tokens[idx + 1].type == TokenType::Minus) ? JitOp::Sub : JitOp::Mul);
+                var_val = std::to_string(jit.compile_and_run(val1, val2, op));
+                idx += 3;
+            } else {
+                var_val = resolve_token(tokens[idx], env);
+                idx++;
+            }
+            
+            env->declare(var_name, var_val, is_const);
+            if (tokens[idx].type == TokenType::Semicolon) idx++;
             continue;
         }
 
-        if (stripped == "}" || stripped == "end" || stripped == "return 0;") {
-            return; 
-        }
-
-        if (stripped.rfind("if ", 0) == 0 && stripped.find('{') != std::string_view::npos) {
-            size_t brace_pos = stripped.find('{');
-            std::string_view condition = trim(stripped.substr(3, brace_pos - 3));
-            bool is_true = evaluate_condition(condition, env);
+        // 3. Conditional Scopes (If Conditions)
+        if (tokens[idx].type == TokenType::Keyword_If) {
+            idx += 2; // step 'if' and '('
+            size_t cond_end = idx;
+            while (tokens[cond_end].type != TokenType::CloseParen) cond_end++;
             
-            size_t if_body_start = index + 1;
-            size_t if_body_end = skip_block(lines, if_body_start, end);
+            bool result = evaluate_condition(tokens, idx, cond_end, env);
+            idx = cond_end + 2; // skip past ')' and '{'
             
-            if (if_body_end == end) {
-                std::cerr << "Syntax Error: Unclosed 'if' block.\n";
-                return;
+            size_t block_end = skip_cpp_block(tokens, idx);
+            if (result) {
+                execute_tokens(tokens, idx, block_end, env);
+            } else {
+                idx = block_end + 1; // Skip block execution cleanly
             }
-
-            size_t next_line_idx = if_body_end + 1;
-            bool has_else = false;
-            size_t else_body_start = 0;
-            size_t else_body_end = 0;
-
-            if (next_line_idx < end && (trim(lines[next_line_idx]).rfind("else", 0) != std::string_view::npos)) {
-                has_else = true;
-                else_body_start = next_line_idx + 1;
-                else_body_end = skip_block(lines, else_body_start, end);
-            }
-
-            if (is_true) {
-                size_t local_idx = if_body_start;
-                execute_block(lines, local_idx, if_body_end, env);
-            } else if (has_else) {
-                size_t local_idx = else_body_start;
-                execute_block(lines, local_idx, else_body_end, env);
-            }
-
-            index = has_else ? (else_body_end + 1) : (if_body_end + 1);
             continue;
         }
 
-        if (stripped.rfind("while ", 0) == 0 && stripped.find('{') != std::string_view::npos) {
-            size_t brace_pos = stripped.find('{');
-            std::string_view condition = trim(stripped.substr(6, brace_pos - 6));
-            size_t loop_body_start = index + 1;
-            size_t loop_body_end = skip_block(lines, loop_body_start, end);
-
-            if (loop_body_end == end) {
-                std::cerr << "Syntax Error: Unclosed 'while' loop.\n";
-                return;
-            }
-
-            size_t iterations = 0;
-            while (evaluate_condition(condition, env)) {
-                if (++iterations > 1000000) {
-                    std::cerr << "Runtime Error: Infinite loop safeguard triggered.\n";
+        // 4. While Loop Scopes
+        if (tokens[idx].type == TokenType::Keyword_While) {
+            idx += 2; // step 'while' and '('
+            size_t cond_end = idx;
+            while (tokens[cond_end].type != TokenType::CloseParen) cond_end++;
+            
+            size_t block_start = cond_end + 2; // past ')' and '{'
+            size_t block_end = skip_cpp_block(tokens, block_start);
+            
+            size_t loop_count = 0;
+            while (evaluate_condition(tokens, idx, cond_end, env)) {
+                if (++loop_count > 100000) {
+                    std::cerr << "Runtime Safetynet: Infinite loop breakout activated.\n";
                     break;
                 }
-                size_t local_idx = loop_body_start;
-                execute_block(lines, local_idx, loop_body_end, env);
+                size_t run_idx = block_start;
+                execute_tokens(tokens, run_idx, block_end, env);
             }
-            index = loop_body_end + 1;
+            idx = block_end + 1;
             continue;
         }
 
-        if (stripped.rfind("def ", 0) == 0) {
-            std::string func_name{trim(stripped.substr(4))};
-            std::vector<std::string> body;
-            index++;
-            while (index < end && trim(lines[index]) != "end") {
-                body.push_back(lines[index]);
-                index++;
-            }
-            ctx.functions[func_name] = body;
-            index++;
-            continue;
-        }
-
-        execute_line(lines[index], env);
-        index++;
+        idx++;
     }
 }
 
+// ============================================================================
+// 5. DRIVER REPL TERMINAL INTERFACE
+// ============================================================================
 void run_repl() {
     std::cout << "=========================================================\n";
-    std::cout << "  Welcome to MiniPhone++ (MP++) Inline Hardware JIT Shell \n";
-    std::cout << "  Type 'exit' or 'quit' to terminate program execution   \n";
+    std::cout << "   MiniPhone++ (MP++) Modern C++ Language Engine         \n";
+    std::cout << "   Engine standard: C++23 Native Context / Tokenizer     \n";
     std::cout << "=========================================================\n";
 
+    std::string program;
     std::string line;
+    int brace_depth = 0;
+
     while (true) {
-        std::cout << "mp++ > ";
+        if (brace_depth == 0) std::cout << "mp++ > ";
+        else std::cout << "   ... ";
+
         if (!std::getline(std::cin, line)) break;
+        if (line == "exit" || line == "quit") break;
 
-        std::string_view stripped = trim(line);
-        if (stripped == "exit" || stripped == "quit") {
-            std::cout << "Goodbye!\n";
-            break;
+        for (char c : line) {
+            if (c == '{') brace_depth++;
+            if (c == '}') brace_depth--;
         }
-        
-        if (stripped.empty()) continue;
 
-        if (stripped.find('{') != std::string_view::npos || stripped.rfind("def ", 0) == 0) {
-            std::vector<std::string> block_lines;
-            block_lines.push_back(std::string(stripped));
-            
-            std::string sub_line;
-            int open_blocks = 1;
-            
-            while (open_blocks > 0) {
-                std::cout << "   ... ";
-                if (!std::getline(std::cin, sub_line)) break;
-                std::string_view sub_stripped = trim(sub_line);
-                
-                if (sub_stripped.find('{') != std::string_view::npos || sub_stripped.rfind("def ", 0) == 0) open_blocks++;
-                if (sub_stripped == "}" || sub_stripped == "end") open_blocks--;
-                
-                block_lines.push_back(sub_line);
-            }
+        program += line + "\n";
+
+        if (brace_depth == 0 && !program.empty()) {
+            std::vector<Token> tokens = tokenize(program);
             size_t idx = 0;
-            execute_block(block_lines, idx, block_lines.size(), ctx.global_env);
-        } else {
-            execute_line(stripped, ctx.global_env);
+            execute_tokens(tokens, idx, tokens.size(), ctx.global_env);
+            program.clear();
         }
     }
 }
@@ -539,15 +458,6 @@ void run_repl() {
 int main() {
     std::ios_base::sync_with_stdio(false);
     std::cin.tie(NULL);
-
-#ifdef _WIN32
-    ctx.global_env->set("os_name", "Windows");
-#elif __APPLE__
-    ctx.global_env->set("os_name", "macOS");
-#else
-    ctx.global_env->set("os_name", "Linux");
-#endif
-
     run_repl();
     return 0;
 }
