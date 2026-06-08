@@ -1,26 +1,29 @@
-# The name of your automation robot
-name: MP++ Module Auto-Merger
-
-# WHEN should this robot wake up?
-on:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - 'modules/**' # Only run if someone changes or adds files inside the modules folder
-
-# WHAT should the robot do?
-jobs:
-  merge-it:
-    runs-on: ubuntu-latest
-    steps:
-      # Step 1: Tell the robot to download your repository code to its virtual server
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # Step 2: Use an official community tool to automatically merge the Pull Request
-      - name: Automatically Merge Pull Request
-        uses: "pascalgn/automerge-action@v0.16.4"
-        env:
-          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" # Built-in security key GitHub makes for you
-          MERGE_METHOD: "merge"
+      - name: Remove old module versions
+        run: |
+          cd modules
+          
+          # This will find all .mp files
+          for file in *.mp; do
+            # Extract the module name and version. 
+            # This regex splits 'my_module_v1.0.0.mp' into 'my_module' and '1.0.0'
+            base_name=$(echo $file | sed -E 's/(.*)_[vV]?[0-9]+\.[0-9]+.*\.mp/\1/')
+            
+            # Now we find all files that start with the base_name
+            # and sort them using 'sort -V' (version sort)
+            # This handles 1.10.0 being newer than 1.9.0 automatically
+            
+            files_to_check=$(ls ${base_name}_* 2>/dev/null)
+            
+            if [ "$(echo "$files_to_check" | wc -l)" -gt 1 ]; then
+              echo "Cleaning up $base_name versions..."
+              
+              # 'sort -V' is the key here. It treats version numbers mathematically
+              # rather than alphabetically.
+              sorted_files=$(echo "$files_to_check" | sort -V)
+              
+              # Keep the last line (newest), delete the rest
+              files_to_delete=$(echo "$sorted_files" | head -n -1)
+              
+              echo "$files_to_delete" | xargs rm -f
+            fi
+          done
