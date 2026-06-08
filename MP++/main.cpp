@@ -301,7 +301,7 @@ void execute_line(std::string_view line, std::shared_ptr<Environment> env) {
 #endif
         std::stringstream cmd;
         cmd << "curl -s -f https://raw.githubusercontent.com/poopyking482-sudo/MP-Interpreter/main/modules/"
-            << pkg_name << ".mp -o " << local_path;
+            << pkg_name << ".mpp -o " << local_path;
             
         if (std::system(cmd.str().c_str()) == 0) {
             // Read and automatically execute the downloaded code file into memory
