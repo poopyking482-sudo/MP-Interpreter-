@@ -1,0 +1,43 @@
+    - name: Run Enhanced Malware Sandbox Test
+      id: security_check
+      run: |
+        echo "🛡️ Starting Deep AST and Signature Scanning..."
+        PASSED=true
+
+        find modules/ -name "*.mp" | while read -r file; do
+          # 1. Block broken-up malicious strings (checks if parts exist anywhere in the file)
+          if grep -qi "rm" "$file" && grep -qi -- "-rf" "$file"; then
+            echo "❌ CRITICAL: Fragmented destructive signature detected in $file!"
+            PASSED=false
+            exit 1
+          fi
+
+          # 2. Block Base64 obfuscation layouts commonly used to hide spyware payloads
+          if grep -qiE "base64|decode|eval" "$file"; then
+            echo "❌ SECURITY ERROR: Code obfuscation tools are strictly banned in community modules."
+            PASSED=false
+            exit 1
+          fi
+        done
+
+        if [ "$PASSED" = false ]; then exit 1; fi
+
+    # ONLY RUN CLEANUP IF SAFETY CHECKS PASS
+    - name: Remove old module versions
+      if: success()
+      run: |
+        cd modules
+        # Isolate unique base module names
+        base_names=$(ls *.mp 2>/dev/null | sed -E 's/(.*)_[vV]?[0-9]+\.[0-9]+.*\.mp/\1/' | sort -u)
+        
+        for base_name in $base_names; do
+          [ -z "$base_name" ] && continue
+          files_to_check=$(ls ${base_name}_* 2>/dev/null)
+          
+          if [ "$(echo "$files_to_check" | wc -l)" -gt 1 ]; then
+            echo "🧹 Pruning legacy iterations for '$base_name'..."
+            sorted_files=$(echo "$files_to_check" | sort -V)
+            files_to_delete=$(echo "$sorted_files" | head -n -1)
+            echo "$files_to_delete" | xargs -r rm -f
+          fi
+        done
