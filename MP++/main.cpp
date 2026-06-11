@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fstream>
 #include <cctype>
+#include <functional>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -113,7 +114,7 @@ JITEngine jit;
 // 2. LEXICAL TOKENIZER
 // ============================================================================
 enum class TokenType {
-    Keyword_Auto, Keyword_Const, Keyword_If, Keyword_Else, Keyword_While,
+    Keyword_Auto, Keyword_Const, Keyword_If, Keyword_Else, Keyword_While, Keyword_Mpkg,
     Identifier, Number, String,
     Plus, Minus, Star, Assign, EqualEqual, Arrow,
     OpenBrace, CloseBrace, OpenParen, CloseParen, Semicolon,
@@ -172,6 +173,7 @@ std::vector<Token> tokenize(std::string_view source) {
             else if (ident == "if") tokens.push_back({TokenType::Keyword_If, ident});
             else if (ident == "else") tokens.push_back({TokenType::Keyword_Else, ident});
             else if (ident == "while") tokens.push_back({TokenType::Keyword_While, ident});
+            else if (ident == "mpkg") tokens.push_back({TokenType::Keyword_Mpkg, ident});
             else tokens.push_back({TokenType::Identifier, ident});
             continue;
         }
@@ -266,7 +268,6 @@ size_t skip_cpp_block(const std::vector<Token>& tokens, size_t start) {
 
 bool evaluate_condition(const std::vector<Token>& tokens, size_t start, size_t end, std::shared_ptr<Environment> env) {
     if (start >= end) return false;
-    // Simple lookahead evaluation engine for conditions inside paren matrices
     for (size_t i = start; i < end; ++i) {
         if (tokens[i].type == TokenType::EqualEqual) {
             std::string lhs = resolve_token(tokens[start], env);
@@ -278,6 +279,23 @@ bool evaluate_condition(const std::vector<Token>& tokens, size_t start, size_t e
     return (val == "true" || val == "1");
 }
 
+// ----------------------------------------------------------------------------
+// THE LAZY USER LAZY REGISTRY MATRIX
+// ----------------------------------------------------------------------------
+std::unordered_map<std::string, std::function<void(std::shared_ptr<Environment>)>> native_stdlib = {
+    {"log_info", [](auto env) { std::cout << "ℹ️ [INFO]: Hardware Execution Pipeline Stable.\n"; }},
+    {"log_warn", [](auto env) { std::cout << "⚠️ [WARN]: Context boundary capacity limits reached.\n"; }},
+    {"rand", [](auto env) { 
+        int r = std::rand() % 100;
+        env->declare("last_rand", std::to_string(r), false);
+        std::cout << "🎲 [Rand Engine]: Generated value -> " << r << "\n";
+    }},
+    {"clear_jit", [](auto env) { 
+        jit.clear(); 
+        std::cout << "⚡ Hardware JIT machine cache completely flushed.\n"; 
+    }}
+};
+
 void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, std::shared_ptr<Environment> env) {
     while (idx < end) {
         if (tokens[idx].type == TokenType::CloseBrace) {
@@ -285,9 +303,60 @@ void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, s
             return;
         }
 
+        // package execution hook inside token array layout
+        if (tokens[idx].type == TokenType::Keyword_Mpkg) {
+            if (idx + 2 < end && tokens[idx + 1].value == "install") {
+                std::string pkg_name = tokens[idx + 2].value;
+                idx += 3;
+                if (idx < end && tokens[idx].type == TokenType::Semicolon) idx++;
+
+                std::string local_path = "ext/" + pkg_name + ".mp";
+                std::ifstream check_file(local_path);
+                if (check_file.is_open()) {
+                    std::cout << "💡 Notice: Module '" << pkg_name << "' already cached in storage context.\n";
+                    check_file.close();
+                } else {
+                    std::cout << "📡 Downloading community module '" << pkg_name << "' from poopyking482-sudo...\n";
+#ifdef _WIN32
+                    std::system("if not exist ext mkdir ext");
+#else
+                    std::system("mkdir -p ext");
+#endif
+                    std::stringstream cmd;
+                    cmd << "curl -s -f https://raw.githubusercontent.com/poopyking482-sudo/MP-Interpreter/main/modules/"
+                        << pkg_name << ".mp -o " << local_path;
+                    std::system(cmd.str().c_str());
+                }
+
+                std::ifstream file(local_path);
+                if (file.is_open()) {
+                    std::stringstream ss;
+                    ss << file.rdbuf();
+                    std::string file_contents = ss.str();
+                    file.close();
+
+                    std::vector<Token> imported_tokens = tokenize(file_contents);
+                    size_t import_idx = 0;
+                    execute_tokens(imported_tokens, import_idx, imported_tokens.size(), env);
+                    std::cout << "✓ Module '" << pkg_name << "' safely parsed into language environment registry.\n";
+                } else {
+                    std::cout << "✗ Network Error: Could not resolve package path on remote source repository.\n";
+                }
+                continue;
+            }
+        }
+
         // 1. Function Call Expressions or Native Commands
         if (tokens[idx].type == TokenType::Identifier) {
             std::string name = tokens[idx].value;
+
+            // Direct check on lazy function list
+            if (auto it = native_stdlib.find(name); it != native_stdlib.end()) {
+                it->second(env);
+                idx++;
+                if (idx < end && tokens[idx].type == TokenType::Semicolon) idx++;
+                continue;
+            }
 
             if ((name == "print" || name == "println") && tokens[idx + 1].type == TokenType::OpenParen) {
                 idx += 2; // skip print and '('
@@ -297,14 +366,17 @@ void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, s
             }
 
             if (name == "fetch" && tokens[idx + 1].type == TokenType::Semicolon) {
-                std::cout << "■ MiniPhone Engine OS (MP++) ■\nTarget: High-Performance Modern C++ JIT Architecture\n";
+                std::cout << "■ MiniPhone Engine OS (MP++) ■\n";
+                bool found = false;
+                std::string os = ctx.global_env->get("os_name", found);
+                std::cout << "OS: " << (found ? os : "Unknown OS") << "\nTarget: High-Performance Modern C++ JIT Architecture\n";
                 idx += 2;
                 continue;
             }
 
             // User Defined Functions
             if (auto it = ctx.functions.find(name); it != ctx.functions.end() && tokens[idx + 1].type == TokenType::OpenParen) {
-                idx += 4; // skip name, '(', ')', and '{' -> clean execution jumping
+                idx += 4; // skip name, '(', ')', and '{'
                 auto local_env = std::make_shared<Environment>();
                 local_env->parent = env;
                 size_t func_idx = 0;
@@ -421,43 +493,4 @@ void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, s
 
 // ============================================================================
 // 5. DRIVER REPL TERMINAL INTERFACE
-// ============================================================================
-void run_repl() {
-    std::cout << "=========================================================\n";
-    std::cout << "   MiniPhone++ (MP++) Modern C++ Language Engine         \n";
-    std::cout << "   Engine standard: C++23 Native Context / Tokenizer     \n";
-    std::cout << "=========================================================\n";
-
-    std::string program;
-    std::string line;
-    int brace_depth = 0;
-
-    while (true) {
-        if (brace_depth == 0) std::cout << "mp++ > ";
-        else std::cout << "   ... ";
-
-        if (!std::getline(std::cin, line)) break;
-        if (line == "exit" || line == "quit") break;
-
-        for (char c : line) {
-            if (c == '{') brace_depth++;
-            if (c == '}') brace_depth--;
-        }
-
-        program += line + "\n";
-
-        if (brace_depth == 0 && !program.empty()) {
-            std::vector<Token> tokens = tokenize(program);
-            size_t idx = 0;
-            execute_tokens(tokens, idx, tokens.size(), ctx.global_env);
-            program.clear();
-        }
-    }
-}
-
-int main() {
-    std::ios_base::sync_with_stdio(false);
-    std::cin.tie(NULL);
-    run_repl();
-    return 0;
-}
+// ==========================
