@@ -12,6 +12,7 @@
 #include <fstream>
 #include <cctype>
 #include <functional>
+#include <ctime>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -115,6 +116,7 @@ JITEngine jit;
 // ============================================================================
 enum class TokenType {
     Keyword_Auto, Keyword_Const, Keyword_If, Keyword_Else, Keyword_While, Keyword_Mpkg,
+    Keyword_Import,
     Identifier, Number, String,
     Plus, Minus, Star, Assign, EqualEqual, Arrow,
     OpenBrace, CloseBrace, OpenParen, CloseParen, Semicolon,
@@ -174,6 +176,7 @@ std::vector<Token> tokenize(std::string_view source) {
             else if (ident == "else") tokens.push_back({TokenType::Keyword_Else, ident});
             else if (ident == "while") tokens.push_back({TokenType::Keyword_While, ident});
             else if (ident == "mpkg") tokens.push_back({TokenType::Keyword_Mpkg, ident});
+            else if (ident == "import") tokens.push_back({TokenType::Keyword_Import, ident});
             else tokens.push_back({TokenType::Identifier, ident});
             continue;
         }
@@ -343,7 +346,6 @@ void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, s
                 if (idx < end && tokens[idx].type == TokenType::Semicolon)
                     idx++;
 
-                // Import system bridge implementation
                 std::string code = mp_module::import_module(pkg);
                 if (code.empty()) {
                     std::cerr << "✗ mpkg failed: " << pkg << "\n";
@@ -354,6 +356,29 @@ void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, s
                 size_t i = 0;
                 execute_tokens(imported, i, imported.size(), env);
                 std::cout << "✓ Module '" << pkg << "' safely parsed into language environment registry.\n";
+                continue;
+            }
+        }
+
+        // Native Explicit Import Hook
+        if (tokens[idx].type == TokenType::Keyword_Import) {
+            if (idx + 1 < end) {
+                std::string pkg = tokens[idx + 1].value;
+                idx += 2;
+
+                if (idx < end && tokens[idx].type == TokenType::Semicolon)
+                    idx++;
+
+                std::string code = mp_module::import_module(pkg);
+                if (code.empty()) {
+                    std::cerr << "✗ Import failed: Unable to locate module '" << pkg << "'\n";
+                    continue;
+                }
+
+                auto imported = tokenize(code);
+                size_t i = 0;
+                execute_tokens(imported, i, imported.size(), env);
+                std::cout << "✓ Module '" << pkg << "' successfully imported.\n";
                 continue;
             }
         }
@@ -487,28 +512,4 @@ void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, s
                     std::cerr << "Runtime Safetynet: Infinite loop breakout activated.\n";
                     break;
                 }
-                size_t run_idx = block_start;
-                execute_tokens(tokens, run_idx, block_end, env);
-            }
-            idx = block_end + 1;
-            continue;
-        }
-
-        idx++;
-    }
-}
-
-// ============================================================================
-// 6. DRIVER REPL TERMINAL INTERFACE
-// ============================================================================
-int main() {
-    std::srand(static_cast<unsigned int>(std::time(nullptr)));
-    
-    // Inject system configuration metadata properties inside base environment
-    ctx.global_env->declare("os_name", "MiniPhone OS Embedded v4.0", true);
-    
-    std::cout << "==================================================\n";
-    std::cout << "  MiniPhone Architecture Runtime Environment REPL \n";
-    std::cout << "  Native JIT Backend Operations Activated         \n";
-    std::cout << "==================================================\n";
-    std::cout <
+                size_t run_idx = block_s
