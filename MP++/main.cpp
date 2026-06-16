@@ -30,7 +30,7 @@ private:
     std::vector<uint8_t> machine_code;
     void* exec_mem = nullptr;
     size_t allocated_size = 0;
-
+// the jit only supports x86 lol
     void* allocate_executable_memory(size_t size) {
 #ifdef _WIN32
         return VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -110,7 +110,7 @@ public:
 };
 
 JITEngine jit;
-
+// the jit was scary 
 // ============================================================================
 // 2. LEXICAL TOKENIZER
 // ============================================================================
@@ -274,7 +274,7 @@ namespace mp_module {
         return "";
     }
 }
-
+// new import wohoo
 // ============================================================================
 // 5. PARSER AND INTERPRETER ENGINE
 // ============================================================================
@@ -383,7 +383,7 @@ void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, s
             }
         }
 
-        // 2. Function Call Expressions or Native Commands
+        // 2. Function Call Expressions or Native Commands. what there's no stdlib?
         if (tokens[idx].type == TokenType::Identifier) {
             std::string name = tokens[idx].value;
 
