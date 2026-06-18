@@ -250,10 +250,10 @@ namespace mp_module {
         std::ifstream check_file(local_path);
         
         if (check_file.is_open()) {
-            std::cout << "💡 Notice: Module '" << pkg_name << "' already cached in storage context.\n";
+            std::cout << "Notice: Module '" << pkg_name << "' already cached in storage context.\n";
             check_file.close();
         } else {
-            std::cout << "📡 Downloading community module '" << pkg_name << "' from poopyking482-sudo...\n";
+            std::cout << " Downloading community module '" << pkg_name << "' from poopyking482-sudo...\n";
 #ifdef _WIN32
             std::system("if not exist ext mkdir ext");
 #else
@@ -261,7 +261,7 @@ namespace mp_module {
 #endif
             std::stringstream cmd;
             cmd << "curl -s -f https://raw.githubusercontent.com/poopyking482-sudo/MP-Interpreter/main/modules/"
-                << pkg_name << ".mp -o " << local_path;
+                << pkg_name << ".mpp -o " << local_path;
             std::system(cmd.str().c_str());
         }
 
@@ -317,16 +317,16 @@ bool evaluate_condition(const std::vector<Token>& tokens, size_t start, size_t e
 }
 
 std::unordered_map<std::string, std::function<void(std::shared_ptr<Environment>)>> native_stdlib = {
-    {"log_info", [](auto env) { std::cout << "ℹ️ [INFO]: Hardware Execution Pipeline Stable.\n"; }},
-    {"log_warn", [](auto env) { std::cout << "⚠️ [WARN]: Context boundary capacity limits reached.\n"; }},
+    {"log_info", [](auto env) { std::cout << "[INFO]: Hardware Execution Pipeline Stable.\n"; }},
+    {"log_warn", [](auto env) { std::cout << "[WARN]: Context boundary capacity limits reached.\n"; }},
     {"rand", [](auto env) { 
         int r = std::rand() % 100;
         env->declare("last_rand", std::to_string(r), false);
-        std::cout << "🎲 [Rand Engine]: Generated value -> " << r << "\n";
+        std::cout << " [Rand Engine]: Generated value -> " << r << "\n";
     }},
     {"clear_jit", [](auto env) { 
         jit.clear(); 
-        std::cout << "⚡ Hardware JIT machine cache completely flushed.\n"; 
+        std::cout << " Hardware JIT machine cache completely flushed.\n"; 
     }}
 };
 
@@ -508,8 +508,8 @@ void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, s
             
             size_t loop_count = 0;
             while (evaluate_condition(tokens, idx, cond_end, env)) {
-                if (++loop_count > 100000) {
-                    std::cerr << "Runtime Safetynet: Infinite loop breakout activated.\n";
+                if (++loop_count > 10000000000) {
+                    std::cerr << "Runtime Safetynet: infinite loop breakout activated\n";
                     break;
                 }
                 size_t run_idx = block_s
