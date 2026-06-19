@@ -30,7 +30,7 @@ private:
     std::vector<uint8_t> machine_code;
     void* exec_mem = nullptr;
     size_t allocated_size = 0;
-// the jit only supports x86 lol
+
     void* allocate_executable_memory(size_t size) {
 #ifdef _WIN32
         return VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -110,7 +110,7 @@ public:
 };
 
 JITEngine jit;
-// the jit was scary 
+
 // ============================================================================
 // 2. LEXICAL TOKENIZER
 // ============================================================================
@@ -242,7 +242,7 @@ struct InterpreterContext {
 InterpreterContext ctx;
 
 // ============================================================================
-// 4. MODULE SUBSYSTEM (Safe Registry Integration)
+// 4. MODULE SUBSYSTEM (Registry & Storage Hooks)
 // ============================================================================
 namespace mp_module {
     std::string import_module(const std::string& pkg_name) {
@@ -250,10 +250,10 @@ namespace mp_module {
         std::ifstream check_file(local_path);
         
         if (check_file.is_open()) {
-            std::cout << "Notice: Module '" << pkg_name << "' already cached in storage context.\n";
+            std::cout << "💡 Notice: Module '" << pkg_name << "' already cached in storage context.\n";
             check_file.close();
         } else {
-            std::cout << " Downloading community module '" << pkg_name << "' from poopyking482-sudo...\n";
+            std::cout << "📡 Downloading community module '" << pkg_name << "' from poopyking482-sudo...\n";
 #ifdef _WIN32
             std::system("if not exist ext mkdir ext");
 #else
@@ -261,7 +261,7 @@ namespace mp_module {
 #endif
             std::stringstream cmd;
             cmd << "curl -s -f https://raw.githubusercontent.com/poopyking482-sudo/MP-Interpreter/main/modules/"
-                << pkg_name << ".mpp -o " << local_path;
+                << pkg_name << ".mp -o " << local_path;
             std::system(cmd.str().c_str());
         }
 
@@ -274,7 +274,7 @@ namespace mp_module {
         return "";
     }
 }
-// new import wohoo
+
 // ============================================================================
 // 5. PARSER AND INTERPRETER ENGINE
 // ============================================================================
@@ -317,16 +317,16 @@ bool evaluate_condition(const std::vector<Token>& tokens, size_t start, size_t e
 }
 
 std::unordered_map<std::string, std::function<void(std::shared_ptr<Environment>)>> native_stdlib = {
-    {"log_info", [](auto env) { std::cout << "[INFO]: Hardware Execution Pipeline Stable.\n"; }},
-    {"log_warn", [](auto env) { std::cout << "[WARN]: Context boundary capacity limits reached.\n"; }},
+    {"log_info", [](auto env) { std::cout << "ℹ️ [INFO]: Hardware Execution Pipeline Stable.\n"; }},
+    {"log_warn", [](auto env) { std::cout << "⚠️ [WARN]: Context boundary capacity limits reached.\n"; }},
     {"rand", [](auto env) { 
         int r = std::rand() % 100;
         env->declare("last_rand", std::to_string(r), false);
-        std::cout << " [Rand Engine]: Generated value -> " << r << "\n";
+        std::cout << "🎲 [Rand Engine]: Generated value -> " << r << "\n";
     }},
     {"clear_jit", [](auto env) { 
         jit.clear(); 
-        std::cout << " Hardware JIT machine cache completely flushed.\n"; 
+        std::cout << "⚡ Hardware JIT machine cache completely flushed.\n"; 
     }}
 };
 
@@ -337,7 +337,7 @@ void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, s
             return;
         }
 
-        // 1. Package installation / execution hook
+        // 1. Package installation / execution hook (Remote Mirror Fetching)
         if (tokens[idx].type == TokenType::Keyword_Mpkg) {
             if (idx + 2 < end && tokens[idx + 1].value == "install") {
                 std::string pkg = tokens[idx + 2].value;
@@ -360,30 +360,39 @@ void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, s
             }
         }
 
-        // Native Explicit Import Hook
+        // Native Explicit Local Import Hook (Reads directly off file system storage)
         if (tokens[idx].type == TokenType::Keyword_Import) {
-            if (idx + 1 < end) {
-                std::string pkg = tokens[idx + 1].value;
-                idx += 2;
+            idx++;
+            if (idx < end && (tokens[idx].type == TokenType::String || tokens[idx].type == TokenType::Identifier)) {
+                std::string target_file = tokens[idx].value;
+                if (target_file.find(".mp") == std::string::npos) {
+                    target_file += ".mp";
+                }
+                idx++;
 
                 if (idx < end && tokens[idx].type == TokenType::Semicolon)
                     idx++;
 
-                std::string code = mp_module::import_module(pkg);
-                if (code.empty()) {
-                    std::cerr << "✗ Import failed: Unable to locate module '" << pkg << "'\n";
+                std::ifstream local_file(target_file);
+                if (!local_file.is_open()) {
+                    std::cerr << "✗ Import failed: Unable to locate local file '" << target_file << "'\n";
                     continue;
                 }
 
-                auto imported = tokenize(code);
-                size_t i = 0;
-                execute_tokens(imported, i, imported.size(), env);
-                std::cout << "✓ Module '" << pkg << "' successfully imported.\n";
+                std::stringstream ss;
+                ss << local_file.rdbuf();
+                std::string code = ss.str();
+                local_file.close();
+
+                auto imported_tokens = tokenize(code);
+                size_t import_idx = 0;
+                execute_tokens(imported_tokens, import_idx, imported_tokens.size(), env);
+                std::cout << "✓ Local module context target '" << target_file << "' imported successfully.\n";
                 continue;
             }
         }
 
-        // 2. Function Call Expressions or Native Commands. what there's no stdlib?
+        // 2. Function Call Expressions or Native Commands
         if (tokens[idx].type == TokenType::Identifier) {
             std::string name = tokens[idx].value;
 
@@ -497,19 +506,7 @@ void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, s
             continue;
         }
 
-        // 5. While Loop Scopes
+                // 5. While Loop Scopes
         if (tokens[idx].type == TokenType::Keyword_While) {
-            idx += 2; 
-            size_t cond_end = idx;
-            while (tokens[cond_end].type != TokenType::CloseParen) cond_end++;
-            
-            size_t block_start = cond_end + 2; 
-            size_t block_end = skip_cpp_block(tokens, block_start);
-            
-            size_t loop_count = 0;
-            while (evaluate_condition(tokens, idx, cond_end, env)) {
-                if (++loop_count > 10000000000) {
-                    std::cerr << "Runtime Safetynet: infinite loop breakout activated\n";
-                    break;
-                }
-                size_t run_idx = block_s
+            size_t condition_start_idx = idx + 2; 
+  
