@@ -21,7 +21,7 @@
 #endif
 
 // ============================================================================
-// 1. HARDWARE JIT ENGINE BACKEND
+// 1. HARDWARE JIT ENGINE BACKEND (x86_64 Strict Execution)
 // ============================================================================
 enum class JitOp { Add, Sub, Mul };
 
@@ -88,7 +88,11 @@ public:
         if (machine_code.empty()) return 0;
         allocated_size = machine_code.size();
         exec_mem = allocate_executable_memory(allocated_size);
-        if (!exec_mem) return -1;
+        
+        // Safety lock: Throw error instead of returning -1 silently
+        if (!exec_mem) {
+            throw std::runtime_error("❌ JIT Failure: Executable memory allocation failed. x86_64 system required.");
+        }
 
         std::memcpy(exec_mem, machine_code.data(), allocated_size);
         typedef int (*JitFunc)();
@@ -147,7 +151,7 @@ std::vector<Token> tokenize(std::string_view source) {
         if (source[i] == '*') { tokens.push_back({TokenType::Star, "*"}); i++; continue; }
         if (source[i] == '{') { tokens.push_back({TokenType::OpenBrace, "{"}); i++; continue; }
         if (source[i] == '}') { tokens.push_back({TokenType::CloseBrace, "}"}); i++; continue; }
-        if (source[i] == '(') { tokens.push_back({TokenType::OpenParen, "("}); i++; continue; }
+        if (source[i] ==   '(') { tokens.push_back({TokenType::OpenParen, "("}); i++; continue; }
         if (source[i] == ')') { tokens.push_back({TokenType::CloseParen, ")"}); i++; continue; }
         if (source[i] == ';') { tokens.push_back({TokenType::Semicolon, ";"}); i++; continue; }
 
@@ -248,7 +252,7 @@ namespace mp_module {
     std::string import_module(const std::string& pkg_name) {
         std::string local_path = "ext/" + pkg_name + ".mp";
         std::ifstream check_file(local_path);
-        
+
         if (check_file.is_open()) {
             std::cout << "💡 Notice: Module '" << pkg_name << "' already cached in storage context.\n";
             check_file.close();
@@ -431,7 +435,7 @@ void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, s
             if (tokens[idx + 1].type == TokenType::Assign) {
                 std::string var_name = tokens[idx].value;
                 idx += 2; 
-                
+
                 std::string target_val;
                 if (idx + 2 < end && (tokens[idx + 1].type == TokenType::Plus || tokens[idx + 1].type == TokenType::Minus || tokens[idx + 1].type == TokenType::Star)) {
                     int val1 = safe_stoi(resolve_token(tokens[idx], env));
@@ -454,23 +458,23 @@ void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, s
         if (tokens[idx].type == TokenType::Keyword_Const) { is_const = true; idx++; }
         if (tokens[idx].type == TokenType::Keyword_Auto) {
             idx++; 
-            
+
             if (tokens[idx + 1].type == TokenType::OpenParen) {
                 std::string func_name = tokens[idx].value;
                 idx += 5; 
                 size_t body_start = idx + 1;
                 size_t body_end = skip_cpp_block(tokens, body_start);
-                
+
                 std::vector<Token> body_tokens(tokens.begin() + body_start, tokens.begin() + body_end);
                 ctx.functions[func_name] = body_tokens;
-                
+
                 idx = body_end + 1;
                 continue;
             }
 
             std::string var_name = tokens[idx].value;
             idx += 2; 
-            
+
             std::string var_val;
             if (idx + 2 < end && (tokens[idx + 1].type == TokenType::Plus || tokens[idx + 1].type == TokenType::Minus || tokens[idx + 1].type == TokenType::Star)) {
                 int val1 = safe_stoi(resolve_token(tokens[idx], env));
@@ -482,7 +486,7 @@ void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, s
                 var_val = resolve_token(tokens[idx], env);
                 idx++;
             }
-            
+
             env->declare(var_name, var_val, is_const);
             if (tokens[idx].type == TokenType::Semicolon) idx++;
             continue;
@@ -493,10 +497,10 @@ void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, s
             idx += 2; 
             size_t cond_end = idx;
             while (tokens[cond_end].type != TokenType::CloseParen) cond_end++;
-            
+
             bool result = evaluate_condition(tokens, idx, cond_end, env);
             idx = cond_end + 2; 
-            
+
             size_t block_end = skip_cpp_block(tokens, idx);
             if (result) {
                 execute_tokens(tokens, idx, block_end, env);
@@ -506,7 +510,45 @@ void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, s
             continue;
         }
 
-                // 5. While Loop Scopes
-        if (tokens[idx].type == TokenType::Keyword_While) {
-            size_t condition_start_idx = idx + 2; 
-  
+        // 5. A keyword called while
+                if (tokens[idx].type == TokenType::Keyword_While) {
+            size_t condition_start_idx = idx + 2;
+            size_t condition_end_idx = condition_start_idx;
+            while (condition_end_idx < end && tokens[condition_end_idx].type != TokenType::CloseParen) {
+                condition_end_idx++;
+            }
+            size_t block_start_idx = condition_end_idx + 2;
+            size_t block_end_idx = skip_cpp_block(tokens, block_start_idx);
+            auto loop_env = std::make_shared<Environment>();
+            loop_env->parent = env;
+            while (evaluate_condition(tokens, condition_start_idx, condition_end_idx, loop_env)) {
+                size_t execution_pointer = block_start_idx;
+                execute_tokens(tokens, execution_pointer, block_end_idx, loop_env);
+            }
+            idx = block_end_idx + 1;
+            continue;
+        }
+        idx++;
+    }
+}
+
+int main() {
+    std::srand(static_cast<unsigned int>(std::time(nullptr)));
+    ctx.global_env->declare("os_name", "Linux/Windows Desktop", true);
+    std::string_view program = 
+        "auto x = 5;\n"
+        "auto y = 10;\n"
+        "auto z = x * y;\n"
+        "println(z);\n"
+        "log_info;\n";
+    try {
+        auto tokens = tokenize(program);
+        size_t idx = 0;
+        execute_tokens(tokens, idx, tokens.size(), ctx.global_env);
+    } catch (const std::exception& e) {
+        std::cerr << "Runtime Exception: " << e.what() << "\n";
+    }
+    return 0;
+}
+// well added a main function
+// shut up c fans
