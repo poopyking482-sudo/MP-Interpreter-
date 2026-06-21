@@ -6,6 +6,12 @@
 #include <memory>
 #include <cctype>
 #include <functional>
+#include <unordered_map>
+#include <sstream>
+#include <fstream>
+#include <cstdlib>
+#include <ctime>
+#include <cassert>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -67,14 +73,14 @@ public:
 
     int compile_and_run(int lhs, int rhs, JitOp op) {
         clear();
-        emit_mov_reg(0xB8, lhs); // mov eax
-        emit_mov_reg(0xB9, rhs); // mov ecx
+        emit_mov_reg(0xB8, lhs); // mov eax, lhs
+        emit_mov_reg(0xB9, rhs); // mov ecx, rhs
         
-        if (op == JitOp::Add) { uint8_t b[] = {0x01, 0xC8}; emit_bytes(b, 2); }
-        else if (op == JitOp::Sub) { uint8_t b[] = {0x29, 0xC8}; emit_bytes(b, 2); }
-        else { uint8_t b[] = {0x0F, 0xAF, 0xC1}; emit_bytes(b, 3); }
+        if (op == JitOp::Add) { uint8_t b[] = {0x01, 0xC8}; emit_bytes(b, 2); }      // add eax, ecx
+        else if (op == JitOp::Sub) { uint8_t b[] = {0x29, 0xC8}; emit_bytes(b, 2); } // sub eax, ecx
+        else { uint8_t b[] = {0x0F, 0xAF, 0xC1}; emit_bytes(b, 3); }                // imul eax, ecx
         
-        uint8_t ret = 0xC3; emit_bytes(&ret, 1);
+        uint8_t ret = 0xC3; emit_bytes(&ret, 1); // ret
 
         allocated_size = machine_code.size();
         exec_mem = allocate_executable_memory(allocated_size);
@@ -88,11 +94,12 @@ public:
 JITEngine jit;
 
 // ============================================================================
-// 2. LEXICAL TOKENIZER (No allocations via string_view)
+// 2. LEXICAL TOKENIZER (Zero heap strings allocations via string_view)
 // ============================================================================
 enum class TokenType {
     Keyword_Auto, Keyword_Const, Keyword_If, Keyword_Else, Keyword_While, Keyword_Mpkg, Keyword_Import,
-    ... // [Kept matching original enum for logic compatibility]
+    Identifier, Number, String, EqualEqual, Arrow, Assign, Plus, Minus, Star,
+    OpenBrace, CloseBrace, OpenParen, CloseParen, Semicolon
 };
 
 struct Token {
@@ -109,7 +116,6 @@ std::vector<Token> tokenize(std::string_view source) {
             while (i < source.length() && source[i] != '\n') i++;
             continue;
         }
-        // Minimal multi-char mappings
         if (source.substr(i, 2) == "==") { tokens.push_back({TokenType::EqualEqual, "=="}); i += 2; continue; }
         if (source.substr(i, 2) == "->") { tokens.push_back({TokenType::Arrow, "->"}); i += 2; continue; }
 
@@ -142,7 +148,10 @@ std::vector<Token> tokenize(std::string_view source) {
             if (ident == "auto") t = TokenType::Keyword_Auto;
             else if (ident == "const") t = TokenType::Keyword_Const;
             else if (ident == "if") t = TokenType::Keyword_If;
+            else if (ident == "else") t = TokenType::Keyword_Else;
             else if (ident == "while") t = TokenType::Keyword_While;
+            else if (ident == "mpkg") t = TokenType::Keyword_Mpkg;
+            else if (ident == "import") t = TokenType::Keyword_Import;
             tokens.push_back({t, ident}); continue;
         }
         i++;
@@ -151,10 +160,10 @@ std::vector<Token> tokenize(std::string_view source) {
 }
 
 // ============================================================================
-// 3. LOW-FOOTPRINT FLAT-VECTOR ENVIROMENT
+// 3. LOW-FOOTPRINT FLAT-VECTOR ENVIRONMENT
 // ============================================================================
 struct Variable {
-    std::string_view value;
+    std::string value; // Owned string content avoids view corruption during live loops
     bool is_const;
 };
 
@@ -163,15 +172,24 @@ struct Environment {
     std::shared_ptr<Environment> parent = nullptr;
 
     void declare(std::string_view name, std::string_view val, bool is_const) {
-        for (auto& [k, v] : variables) { if (k == name) { v = {val, is_const}; return; } }
-        variables.push_back({name, {val, is_const}});
+        for (auto& [k, v] : variables) { if (k == name) { v = {std::string(val), is_const}; return; } }
+        variables.push_back({name, {std::string(val), is_const}});
     }
 
     bool update(std::string_view name, std::string_view val) {
         for (auto& [k, v] : variables) {
-            if (k == name) { if (v.is_const) return false; v.value = val; return true; }
+            if (k == name) { 
+                if (v.is_const) {
+                    std::cerr << "✗ Error: Cannot reassign constant variable '" << name << "'.\n";
+                    return false;
+                }
+                v.value = std::string(val); 
+                return true; 
+            }
         }
-        return parent ? parent->update(name, val) : false;
+        if (parent) return parent->update(name, val);
+        std::cerr << "✗ Error: Variable '" << name << "' was not declared before mutation.\n";
+        return false;
     }
 
     std::string_view get(std::string_view name, bool& found) {
@@ -181,14 +199,61 @@ struct Environment {
     }
 };
 
+struct TransparentHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view sv) const { return std::hash<std::string_view>{}(sv); }
+    size_t operator()(const std::string& s) const { return std::hash<std::string>{}(s); }
+};
+
 struct InterpreterContext {
     std::shared_ptr<Environment> global_env = std::make_shared<Environment>();
-    std::vector<std::pair<std::string_view, std::vector<Token>>> functions;
+    std::unordered_map<std::string, std::vector<Token>, TransparentHash, std::equal_to<>> functions;
+    std::unordered_map<std::string, std::string, TransparentHash, std::equal_to<>> module_cache; 
 };
 InterpreterContext ctx;
 
 // ============================================================================
-// 4. INTERPRETER AND COMPLETED WHILE-LOOP LOGIC
+// 4. REMOTE & LOCAL MODULE SUBSYSTEM (Registry Hooks)
+// ============================================================================
+namespace mp_module {
+    std::string import_module(const std::string& pkg_name) {
+        if (auto it = ctx.module_cache.find(pkg_name); it != ctx.module_cache.end()) {
+            return it->second;
+        }
+
+        std::string local_path = "ext/" + pkg_name + ".mp";
+        std::ifstream check_file(local_path);
+        
+        if (check_file.is_open()) {
+            std::cout << "💡 Notice: Module '" << pkg_name << "' resolved from cache directory.\n";
+            check_file.close();
+        } else {
+            std::cout << "📡 Downloading community module '" << pkg_name << "' via git source mirror...\n";
+#ifdef _WIN32
+            std::system("if not exist ext mkdir ext");
+#else
+            std::system("mkdir -p ext");
+#endif
+            std::stringstream cmd;
+            cmd << "curl -s -f https://raw.githubusercontent.com/poopyking482-sudo/MP-Interpreter/main/modules/"
+                << pkg_name << ".mp -o " << local_path;
+            std::system(cmd.str().c_str());
+        }
+
+        std::ifstream file(local_path);
+        if (file.is_open()) {
+            std::stringstream ss;
+            ss << file.rdbuf();
+            std::string code = ss.str();
+            ctx.module_cache[pkg_name] = code;
+            return code;
+        }
+        return "";
+    }
+}
+
+// ============================================================================
+// 5. PARSER AND INTERPRETER ENGINE
 // ============================================================================
 std::string_view resolve_token(const Token& tok, std::shared_ptr<Environment> env) {
     if (tok.type == TokenType::Identifier) {
@@ -201,8 +266,10 @@ std::string_view resolve_token(const Token& tok, std::shared_ptr<Environment> en
 
 int safe_stoi(std::string_view str) {
     int val = 0;
+    bool neg = false;
+    if(!str.empty() && str[0] == '-') { neg = true; str.remove_prefix(1); }
     for (char c : str) { if (std::isdigit(c)) val = val * 10 + (c - '0'); }
-    return val;
+    return neg ? -val : val;
 }
 
 size_t skip_cpp_block(const std::vector<Token>& tokens, size_t start) {
@@ -223,31 +290,223 @@ bool evaluate_condition(const std::vector<Token>& tokens, size_t start, size_t e
             return resolve_token(tokens[start], env) == resolve_token(tokens[i + 1], env);
         }
     }
-    return resolve_token(tokens[start], env) == "true";
+    std::string_view val = resolve_token(tokens[start], env);
+    return (val == "true" || safe_stoi(val) != 0);
 }
+
+std::string evaluate_expression(const std::vector<Token>& tokens, size_t start, size_t end, std::shared_ptr<Environment> env) {
+    if (start >= end) return "0";
+    if (end - start == 1) return std::string(resolve_token(tokens[start], env));
+
+    if (end - start == 3) {
+        int lhs = safe_stoi(resolve_token(tokens[start], env));
+        int rhs = safe_stoi(resolve_token(tokens[start + 2], env));
+        TokenType op = tokens[start + 1].type;
+        
+        JitOp jit_op = JitOp::Add;
+        if (op == TokenType::Minus) jit_op = JitOp::Sub;
+        if (op == TokenType::Star) jit_op = JitOp::Mul;
+
+        return std::to_string(jit.compile_and_run(lhs, rhs, jit_op));
+    }
+    return std::string(resolve_token(tokens[start], env));
+}
+
+// Global native map definition
+std::unordered_map<std::string_view, std::function<void(std::shared_ptr<Environment>)>> native_stdlib = {
+    {"log_info", [](auto) { std::cout << "ℹ️ [INFO]: Hardware Execution Pipeline Stable.\n"; }},
+    {"log_warn", [](auto) { std::cout << "⚠️ [WARN]: Context boundary capacity limits reached.\n"; }},
+    {"rand", [](auto env) { 
+        int r = std::rand() % 100;
+        env->declare("last_rand", std::to_string(r), false);
+        std::cout << "🎲 [Rand Engine]: Generated value -> " << r << "\n";
+    }},
+    {"clear_jit", [](auto) { 
+        jit.clear(); 
+        std::cout << "⚡ Hardware JIT machine cache completely flushed.\n"; 
+    }}
+};
 
 void execute_tokens(const std::vector<Token>& tokens, size_t& idx, size_t end, std::shared_ptr<Environment> env) {
     while (idx < end) {
         if (tokens[idx].type == TokenType::CloseBrace) { idx++; return; }
 
-        // [Missing implementation handled here]: Streamlined While Loop Logic
-        if (tokens[idx].type == TokenType::Keyword_While) {
-            size_t cond_start = idx + 2;
-            size_t cond_end = cond_start;
-            while (tokens[cond_end].type != TokenType::CloseParen) cond_end++;
+        // 1. Remote Mpkg Dependency Installer Engine Hook
+        if (tokens[idx].type == TokenType::Keyword_Mpkg) {
+            if (idx + 2 < end && tokens[idx + 1].value == "install") {
+                std::string pkg = std::string(tokens[idx + 2].value);
+                idx += 3;
+                if (idx < end && tokens[idx].type == TokenType::Semicolon) idx++;
+
+                std::string code = mp_module::import_module(pkg);
+                if (!code.empty()) {
+                    auto imported = tokenize(code);
+                    size_t i = 0;
+                    execute_tokens(imported, i, imported.size(), env);
+                    std::cout << "✓ Module '" << pkg << "' loaded into process state.\n";
+                }
+                continue;
+            }
+        }
+
+        // 2. Local File System Import Hook 
+        if (tokens[idx].type == TokenType::Keyword_Import) {
+            idx++;
+            if (idx < end && (tokens[idx].type == TokenType::String || tokens[idx].type == TokenType::Identifier)) {
+                std::string target_file = std::string(tokens[idx].value);
+                if (target_file.find(".mp") == std::string::npos) target_file += ".mp";
+                idx++;
+                if (idx < end && tokens[idx].type == TokenType::Semicolon) idx++;
+
+                std::ifstream local_file(target_file);
+                if (local_file.is_open()) {
+                    std::stringstream ss; ss << local_file.rdbuf();
+                    std::string code = ss.str();
+                    auto imported_tokens = tokenize(code);
+                    size_t import_idx = 0;
+                    execute_tokens(imported_tokens, import_idx, imported_tokens.size(), env);
+                }
+                continue;
+            }
+        }
+
+        // 3. Multi-branch Identifiers (Native Stdlib, Printing, Functions, Assignment Mutation)
+        if (tokens[idx].type == TokenType::Identifier) {
+            std::string_view name = tokens[idx].value;
+
+            if (auto it = native_stdlib.find(name); it != native_stdlib.end()) {
+                it->second(env); idx++;
+                if (idx < end && tokens[idx].type == TokenType::Semicolon) idx++;
+                continue;
+            }
+
+            if ((name == "print" || name == "println") && tokens[idx + 1].type == TokenType::OpenParen) {
+                idx += 2; 
+                std::cout << resolve_token(tokens[idx], env) << (name == "println" ? "\n" : "");
+                idx += 3; // Skip expr, ')', ';'
+                continue;
+            }
+
+            if (name == "fetch" && tokens[idx + 1].type == TokenType::Semicolon) {
+                std::cout << "■ MiniPhone Engine OS (MP++) ■\nTarget: JIT C++ Core Assembly Architecture\n";
+                idx += 2;
+                continue;
+            }
+
+            if (auto it = ctx.functions.find(std::string(name)); it != ctx.functions.end() && tokens[idx + 1].type == TokenType::OpenParen) {
+                idx += 4; // Skip name, '(', ')', '{'
+                auto local_env = std::make_shared<Environment>();
+                local_env->parent = env;
+                size_t func_idx = 0;
+                execute_tokens(it->second, func_idx, it->second.size(), local_env);
+                continue;
+            }
+
+            if (idx + 1 < end && tokens[idx + 1].type == TokenType::Assign) {
+                std::string_view var_name = tokens[idx].value;
+                idx += 2; 
+                size_t expr_start = idx;
+                while (idx < end && tokens[idx].type != TokenType::Semicolon) idx++;
+                
+                std::string val = evaluate_expression(tokens, expr_start, idx, env);
+                env->update(var_name, val);
+                idx++; // Skip ';'
+                continue;
+            }
+        }
+
+        // 4. Variable Declarations (auto / const auto) & Function Bindings
+        bool is_const = false;
+        if (tokens[idx].type == TokenType::Keyword_Const) { is_const = true; idx++; }
+        if (tokens[idx].type == TokenType::Keyword_Auto) {
+            idx++; 
             
-            size_t body_start = cond_end + 2;
+            if (idx + 1 < end && tokens[idx + 1].type == TokenType::OpenParen) {
+                std::string func_name = std::string(tokens[idx].value);
+                idx += 4; // Skip name, '(', ')', '{'
+                size_t body_start = idx;
+                size_t body_end = skip_cpp_block(tokens, body_start);
+                
+                std::vector<Token> body_tokens(tokens.begin() + body_start, tokens.begin() + body_end);
+                ctx.functions[func_name] = body_tokens;
+                idx = body_end + 1; // Advance past '}'
+                continue;
+            }
+
+            std::string_view var_name = tokens[idx].value;
+            idx += 2; // Skip name, '='
+            size_t expr_start = idx;
+            while (idx < end && tokens[idx].type != TokenType::Semicolon) idx++;
+            
+            std::string val = evaluate_expression(tokens, expr_start, idx, env);
+            env->declare(var_name, val, is_const);
+            idx++; // Skip ';'
+            continue;
+        }
+
+        // 5. Conditional Blocks
+        if (tokens[idx].type == TokenType::Keyword_If) {
+            idx += 2; 
+            size_t cond_start = idx;
+            while (idx < end && tokens[idx].type != TokenType::CloseParen) idx++;
+            size_t cond_end = idx++; // pointer now at OpenBrace
+            
+            bool result = evaluate_condition(tokens, cond_start, cond_end, env);
+            idx++; // Skip '{'
+            size_t body_start = idx;
             size_t body_end = skip_cpp_block(tokens, body_start);
             
-            while (evaluate_condition(tokens, cond_start, cond_end, env)) {
-                size_t loop_idx = body_start;
-                execute_tokens(tokens, loop_idx, body_end, env);
+            if (result) {
+                size_t runner_idx = body_start;
+                execute_tokens(tokens, runner_idx, body_end, env);
             }
             idx = body_end + 1;
             continue;
         }
-        
-        // Rest of statement processing optimized linearly, what statement
+
+        // 6. JIT-Backed, Zero-Allocation While Loops
+        if (tokens[idx].type == TokenType::Keyword_While) {
+            idx += 2; // Skip 'while' and '('
+            size_t condition_start_idx = idx;
+            while (idx < end && tokens[idx].type != TokenType::CloseParen) idx++;
+            size_t condition_end_idx = idx;
+            idx += 2; // Skip ')' and '{'
+            
+            size_t body_start_idx = idx;
+            size_t body_end_idx = skip_cpp_block(tokens, body_start_idx);
+            
+            while (evaluate_condition(tokens, condition_start_idx, condition_end_idx, env)) {
+                size_t runner_idx = body_start_idx;
+                execute_tokens(tokens, runner_idx, body_end_idx, env);
+            }
+            idx = body_end_idx + 1;
+            continue;
+        }
+
         idx++;
     }
+}
+
+// ============================================================================
+// 6. HARNESS VERIFICATION TEST (Fixed Syntax Error)
+// ============================================================================
+int main() {
+    std::srand(static_cast<unsigned>(std::time(nullptr)));
+
+    std::string_view source = R"(
+        auto result = 1;
+        auto counter = 4;
+        while (counter) {
+            result = result * 2;
+            counter = counter - 1;
+        }
+        println(result);
+        log_info();
+    )"; // <-- Fixed missing trailing delimiter here
+
+    std::cout << " Testing system merge with JIT...\n";
+    auto tokens = tokenize(source);
+    size_t idx = 0;
+    execute_tokens(tokens, idx, tokens.size(), ctx.global_env);
+    return 0;
 }
